@@ -1,0 +1,13 @@
+{
+  "name": "satisfactory-blueprint-restoration",
+  "version": "1.0.0",
+  "description": "",
+  "main": "src/index.mjs",
+  "scripts": {
+    "start": "node src/index.mjs"
+  },
+  "type": "module",
+  "dependencies": {
+    "@etothepii/satisfactory-file-parser": "^4.1.1"
+  }
+}
