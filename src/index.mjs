@@ -6,6 +6,20 @@ import { Parser } from '@etothepii/satisfactory-file-parser';
 const SAVE_DIR = '/data/saves';
 const OUTPUT_DIR = '/data/output';
 
+function quatConj(q) { return {x: -q.x, y: -q.y, z: -q.z, w: q.w}; }
+function quatMul(a, b) {
+    return {
+        w: a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z,
+        x: a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
+        y: a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x,
+        z: a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w,
+    };
+}
+function rotateByQuat(v, q) {
+    const r = quatMul(quatMul(q, {x: v.x, y: v.y, z: v.z, w: 0}), quatConj(q));
+    return {x: r.x, y: r.y, z: r.z};
+}
+
 function main() {
     const args = process.argv.slice(2);
     const saveFile = args[0];
@@ -154,13 +168,26 @@ function findBlueprintGroups(save) {
         proxyAge.set(proxy, Math.round((maxId - getProxyId(proxy)) / idRange * 100));
     }
 
-    // Group by blueprint name
-    const byName = new Map();
+    // Group by blueprint name (case-insensitive dedup, display name from latest placement)
+    const byKey = new Map();
+    const displayNames = new Map();
     for (const [proxy, entities] of proxyEntities) {
         const nameVal = getPropValue(proxy, 'mBlueprintName');
         const name = typeof nameVal === 'string' ? nameVal : nameVal?.value || 'unnamed';
-        if (!byName.has(name)) byName.set(name, []);
-        byName.get(name).push({ proxy, entities, age: proxyAge.get(proxy) });
+        const key = name.toLowerCase();
+        const age = proxyAge.get(proxy);
+        if (!byKey.has(key)) {
+            byKey.set(key, []);
+            displayNames.set(key, { name, age });
+        } else if (age > displayNames.get(key).age) {
+            displayNames.set(key, { name, age });
+        }
+        byKey.get(key).push({ proxy, entities, age });
+    }
+
+    const byName = new Map();
+    for (const [key, instances] of byKey) {
+        byName.set(displayNames.get(key).name, instances);
     }
 
     return byName;
@@ -191,7 +218,7 @@ function listBlueprints(groups, verbose) {
 }
 
 function listInstances(groups, name) {
-    const instances = groups.get(name);
+    const instances = findGroup(groups, name);
     if (!instances) {
         console.error(`Blueprint "${name}" not found. Use 'list' to see available names.`);
         process.exit(1);
@@ -223,6 +250,10 @@ function summarizeEntities(entities) {
     return Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([t, c]) => `${c}x ${t}`).join(', ');
 }
 
+function findGroup(groups, name) {
+    return groups.get(name) || [...groups.entries()].find(([k]) => k.toLowerCase() === name.toLowerCase())?.[1];
+}
+
 function getProxyId(proxy) {
     return parseInt(proxy.instanceName.match(/_(\d+)$/)?.[1] || '0');
 }
@@ -245,10 +276,28 @@ function buildBlueprintFromEntities(name, proxy, entities, save) {
 
     const STRIP_PROPS = ['mBlueprintProxy', 'mConveyorChainActor'];
 
+    // Transform world coordinates to blueprint-local coordinates
+    const proxyRot = proxy.transform?.rotation || {x:0,y:0,z:0,w:1};
+    const proxyPos = proxy.transform?.translation || {x:0,y:0,z:0};
+    const invRot = quatConj(proxyRot);
+
+    // Blueprint origin is offset from proxy by half a designer grid cell (200) in local X
+    const GRID_HALF_CELL = 200;
+    const originOffset = rotateByQuat({x: GRID_HALF_CELL, y: 0, z: 0}, proxyRot);
+    const origin = {x: proxyPos.x + originOffset.x, y: proxyPos.y + originOffset.y, z: proxyPos.z + originOffset.z};
+
     const cleanedObjects = entities.map(obj => {
         const clone = JSON.parse(JSON.stringify(obj));
         if (clone.properties instanceof Object && !Array.isArray(clone.properties)) {
             for (const prop of STRIP_PROPS) delete clone.properties[prop];
+        }
+        if (clone.transform?.translation) {
+            const t = clone.transform.translation;
+            const rel = {x: t.x - origin.x, y: t.y - origin.y, z: t.z - origin.z};
+            clone.transform.translation = rotateByQuat(rel, invRot);
+        }
+        if (clone.transform?.rotation) {
+            clone.transform.rotation = quatMul(invRot, clone.transform.rotation);
         }
         return clone;
     });
@@ -332,13 +381,17 @@ function extractBlueprints(save, groups, opts) {
     mkdirSync(sessionDir, { recursive: true });
     console.log(`Session: "${save._sessionName}"`);
 
-    const toExtract = opts.name
-        ? [[opts.name, groups.get(opts.name)]].filter(([, v]) => v)
-        : [...groups.entries()];
-
-    if (opts.name && !groups.has(opts.name)) {
-        console.error(`Blueprint "${opts.name}" not found. Use 'list' to see available names.`);
-        process.exit(1);
+    let toExtract;
+    if (opts.name) {
+        const found = findGroup(groups, opts.name);
+        if (!found) {
+            console.error(`Blueprint "${opts.name}" not found. Use 'list' to see available names.`);
+            process.exit(1);
+        }
+        const displayName = [...groups.entries()].find(([, v]) => v === found)[0];
+        toExtract = [[displayName, found]];
+    } else {
+        toExtract = [...groups.entries()];
     }
 
     console.log(`\nExtracting ${toExtract.length} blueprint(s) to ${OUTPUT_DIR}\n`);

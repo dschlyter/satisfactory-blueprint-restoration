@@ -26,4 +26,4 @@ function parseAndDump(label, sbpPath, sbpcfgPath) {
 }
 
 parseAndDump('Original', '/data/saves/blueprints/2x Assemblers.sbp', '/data/saves/blueprints/2x Assemblers.sbpcfg');
-parseAndDump('Extracted', '/data/output/2x Assemblers.sbp', '/data/output/2x Assemblers.sbpcfg');
+parseAndDump('Extracted', '/data/output/Tech42 REV3NGE/2x Assemblers.sbp', '/data/output/Tech42 REV3NGE/2x Assemblers.sbpcfg');
