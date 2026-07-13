@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { Parser } from '@etothepii/satisfactory-file-parser';
 
@@ -8,18 +8,18 @@ const OUTPUT_DIR = '/data/output';
 
 function main() {
     const args = process.argv.slice(2);
-    const command = args[0];
-    const saveFile = args[1];
+    const saveFile = args[0];
+    const command = args[1];
 
-    if (!command || !saveFile) {
-        console.log('Usage: satisfactory-blueprint-restoration <command> <save.sav> [options]');
+    if (!saveFile || !command) {
+        console.log('Usage: satisfactory-blueprint-restoration <save.sav> <command> [options]');
         console.log('');
         console.log('Commands:');
-        console.log('  list <save.sav> [-v]                  List unique blueprint names');
-        console.log('  instances <save.sav> "name"           List all instances of a blueprint');
-        console.log('  extract <save.sav> [--all]            Extract blueprints to output dir');
-        console.log('  extract <save.sav> --name "name"      Extract specific blueprint by name');
-        console.log('  extract <save.sav> --pick "name" N    Pick Nth instance of a blueprint');
+        console.log('  list [-v]                             List unique blueprint names');
+        console.log('  instances "name"                      List all instances of a blueprint');
+        console.log('  extract [--all]                       Extract all blueprints, latest placement (default)');
+        console.log('  extract --name "name"                 Extract specific blueprint by name');
+        console.log('  extract --pick "name" [N]             Pick Nth instance (default: latest)');
         process.exit(1);
     }
 
@@ -31,7 +31,7 @@ function main() {
         listBlueprints(groups, verbose);
     } else if (command === 'instances') {
         const name = args[2];
-        if (!name) { console.error('Usage: instances <save.sav> "name"'); process.exit(1); }
+        if (!name) { console.error('Usage: <save.sav> instances "name"'); process.exit(1); }
         listInstances(groups, name);
     } else if (command === 'extract') {
         const opts = parseExtractOptions(args.slice(2));
@@ -47,8 +47,26 @@ function toArrayBuffer(buf) {
 }
 
 function parseSave(path) {
+    if (!existsSync(path)) {
+        console.error(`Save file not found: ${path}`);
+        console.error(`Place your .sav file in the data/ directory and pass the filename.`);
+        process.exit(1);
+    }
     console.log(`Parsing save: ${path}`);
-    return Parser.ParseSave('save', toArrayBuffer(readFileSync(path)));
+    const save = Parser.ParseSave('save', toArrayBuffer(readFileSync(path)));
+    save._sessionName = getSessionName(save);
+    return save;
+}
+
+function getSessionName(save) {
+    const allObjects = getAllObjects(save);
+    for (const obj of allObjects) {
+        const name = getPropValue(obj, 'mReplicatedSessionName');
+        if (name) return name;
+        const saveName = getPropValue(obj, 'mSaveSessionName');
+        if (saveName) return saveName;
+    }
+    return 'unknown';
 }
 
 function parseExtractOptions(args) {
@@ -56,7 +74,11 @@ function parseExtractOptions(args) {
     for (let i = 0; i < args.length; i++) {
         if (args[i] === '--all') opts.all = true;
         if (args[i] === '--name') opts.name = args[++i];
-        if (args[i] === '--pick') { opts.name = args[++i]; opts.pick = parseInt(args[++i], 10); }
+        if (args[i] === '--pick') {
+            opts.name = args[++i];
+            const next = args[i + 1];
+            if (next !== undefined && !next.startsWith('-')) opts.pick = parseInt(args[++i], 10);
+        }
     }
     if (!opts.name) opts.all = true;
     return opts;
@@ -122,13 +144,23 @@ function findBlueprintGroups(save) {
         }
     }
 
+    // Compute relative age (0=oldest, 100=newest) from proxy IDs (count down from INT32_MAX)
+    const allIds = proxies.map(p => getProxyId(p)).sort((a, b) => a - b);
+    const maxId = allIds[allIds.length - 1];
+    const minId = allIds[0];
+    const idRange = maxId - minId || 1;
+    const proxyAge = new Map();
+    for (const proxy of proxies) {
+        proxyAge.set(proxy, Math.round((maxId - getProxyId(proxy)) / idRange * 100));
+    }
+
     // Group by blueprint name
     const byName = new Map();
     for (const [proxy, entities] of proxyEntities) {
         const nameVal = getPropValue(proxy, 'mBlueprintName');
         const name = typeof nameVal === 'string' ? nameVal : nameVal?.value || 'unnamed';
         if (!byName.has(name)) byName.set(name, []);
-        byName.get(name).push({ proxy, entities });
+        byName.get(name).push({ proxy, entities, age: proxyAge.get(proxy) });
     }
 
     return byName;
@@ -142,17 +174,19 @@ function listBlueprints(groups, verbose) {
 
     console.log(`\n${groups.size} unique blueprint(s):\n`);
     const sorted = [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-    for (const [name, instances] of sorted) {
-        if (verbose) {
-            const entityCounts = instances.map(i => i.entities.length);
-            const maxEntities = Math.max(...entityCounts);
-            const minEntities = Math.min(...entityCounts);
-            const countStr = minEntities === maxEntities ? `${maxEntities}` : `${minEntities}-${maxEntities}`;
-            console.log(`  "${name}" — ${instances.length} placement(s), ${countStr} entities each`);
-        } else {
-            const suffix = instances.length > 1 ? ` (${instances.length}x)` : '';
-            console.log(`  ${name}${suffix}`);
-        }
+    const range = (arr) => { const min = Math.min(...arr); const max = Math.max(...arr); return min === max ? `${min}` : `${min}-${max}`; };
+    const rows = sorted.map(([name, instances]) => [
+        verbose ? `"${name}"` : name,
+        `${instances.length}`,
+        range(instances.map(i => i.entities.length)),
+        range(instances.map(i => i.age)) + '%',
+    ]);
+    const cols = ['Name', 'Instances', 'Entities', 'Age'];
+    const widths = cols.map((c, ci) => Math.max(c.length, ...rows.map(r => r[ci].length)));
+    console.log(`  ${cols[0].padEnd(widths[0])}  ${cols[1].padStart(widths[1])}  ${cols[2].padStart(widths[2])}  ${cols[3].padStart(widths[3])}`);
+    console.log(`  ${widths.map(w => ''.padEnd(w, '-')).join('  ')}`);
+    for (const r of rows) {
+        console.log(`  ${r[0].padEnd(widths[0])}  ${r[1].padStart(widths[1])}  ${r[2].padStart(widths[2])}  ${r[3].padStart(widths[3])}`);
     }
 }
 
@@ -164,19 +198,40 @@ function listInstances(groups, name) {
     }
 
     console.log(`\n"${name}" — ${instances.length} instance(s):\n`);
+    instances.sort((a, b) => a.age - b.age);
     for (let i = 0; i < instances.length; i++) {
         const inst = instances[i];
         const pos = inst.proxy.transform?.translation;
         const posStr = pos ? `at (${Math.round(pos.x)}, ${Math.round(pos.y)}, ${Math.round(pos.z)})` : '';
-        console.log(`  [${i}] ${inst.entities.length} entities ${posStr}`);
+        const summary = summarizeEntities(inst.entities);
+        console.log(`  [${i}] ${inst.entities.length} entities, age ${inst.age}% ${posStr}`);
+        if (summary) console.log(`       ${summary}`);
     }
     console.log(`\nTo extract a specific instance: ./run.sh extract <save.sav> --pick "${name}" <index>`);
 }
 
+function summarizeEntities(entities) {
+    const counts = {};
+    for (const obj of entities) {
+        if (obj.typePath.includes('Component') || obj.typePath.includes('InfoComponent')) continue;
+        const short = obj.typePath.split('/').pop()
+            .replace(/\.\w+_C$/, '')
+            .replace(/^Build_/, '')
+            .replace(/([a-z])([A-Z])/g, '$1 $2');
+        counts[short] = (counts[short] || 0) + 1;
+    }
+    return Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([t, c]) => `${c}x ${t}`).join(', ');
+}
+
+function getProxyId(proxy) {
+    return parseInt(proxy.instanceName.match(/_(\d+)$/)?.[1] || '0');
+}
+
 function selectInstance(instances, pick) {
     if (pick !== null && pick !== undefined) return instances[pick];
-    // Default: pick the instance with the most entities
-    return instances.reduce((best, cur) => cur.entities.length > best.entities.length ? cur : best);
+    // Default: most recently placed (lowest proxy ID = newest)
+    return instances.reduce((best, cur) =>
+        getProxyId(cur.proxy) < getProxyId(best.proxy) ? cur : best);
 }
 
 function buildBlueprintFromEntities(name, proxy, entities, save) {
@@ -188,13 +243,12 @@ function buildBlueprintFromEntities(name, proxy, entities, save) {
     }
     const recipeReferences = [...recipes].map(p => ({ levelName: '', pathName: p }));
 
-    // Strip mBlueprintProxy from entity properties and deep-clone
+    const STRIP_PROPS = ['mBlueprintProxy', 'mConveyorChainActor'];
+
     const cleanedObjects = entities.map(obj => {
         const clone = JSON.parse(JSON.stringify(obj));
-        if (clone.properties) {
-            if (clone.properties instanceof Object && !Array.isArray(clone.properties)) {
-                delete clone.properties.mBlueprintProxy;
-            }
+        if (clone.properties instanceof Object && !Array.isArray(clone.properties)) {
+            for (const prop of STRIP_PROPS) delete clone.properties[prop];
         }
         return clone;
     });
@@ -274,7 +328,9 @@ function extractBlueprints(save, groups, opts) {
         return;
     }
 
-    mkdirSync(OUTPUT_DIR, { recursive: true });
+    const sessionDir = join(OUTPUT_DIR, save._sessionName);
+    mkdirSync(sessionDir, { recursive: true });
+    console.log(`Session: "${save._sessionName}"`);
 
     const toExtract = opts.name
         ? [[opts.name, groups.get(opts.name)]].filter(([, v]) => v)
@@ -290,11 +346,12 @@ function extractBlueprints(save, groups, opts) {
     let extracted = 0;
     for (const [name, instances] of toExtract) {
         const instance = selectInstance(instances, opts.pick);
-        console.log(`"${name}" — ${instance.entities.length} entities (from ${instances.length} placement(s))`);
+        const pickNote = instances.length > 1 ? ` (latest of ${instances.length} placements)` : '';
+        console.log(`"${name}" — ${instance.entities.length} entities${pickNote}`);
 
         try {
             const blueprint = buildBlueprintFromEntities(name, instance.proxy, instance.entities, save);
-            writeBlueprintFiles(OUTPUT_DIR, name, blueprint);
+            writeBlueprintFiles(sessionDir, name, blueprint);
             extracted++;
         } catch (e) {
             console.error(`  ERROR: ${e.message}`);
