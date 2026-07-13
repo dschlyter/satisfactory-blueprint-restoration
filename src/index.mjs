@@ -34,6 +34,7 @@ function main() {
         console.log('  extract [--all]                       Extract all blueprints, latest placement (default)');
         console.log('  extract --name "name"                 Extract specific blueprint by name');
         console.log('  extract --pick "name" [N]             Pick Nth instance (default: latest)');
+        console.log('  extract --designer-size 1|2|3          Override designer size (mk1=4, mk2=5, mk3=6)');
         process.exit(1);
     }
 
@@ -69,6 +70,7 @@ function parseSave(path) {
     console.log(`Parsing save: ${path}`);
     const save = Parser.ParseSave('save', toArrayBuffer(readFileSync(path)));
     save._sessionName = getSessionName(save);
+    save._maxDesignerDim = detectMaxDesignerTier(save);
     return save;
 }
 
@@ -84,7 +86,7 @@ function getSessionName(save) {
 }
 
 function parseExtractOptions(args) {
-    const opts = { all: false, name: null, pick: null };
+    const opts = { all: false, name: null, pick: null, designerSize: null };
     for (let i = 0; i < args.length; i++) {
         if (args[i] === '--all') opts.all = true;
         if (args[i] === '--name') opts.name = args[++i];
@@ -92,6 +94,12 @@ function parseExtractOptions(args) {
             opts.name = args[++i];
             const next = args[i + 1];
             if (next !== undefined && !next.startsWith('-')) opts.pick = parseInt(args[++i], 10);
+        }
+        if (args[i] === '--designer-size') {
+            const mk = parseInt(args[++i], 10);
+            const sizes = { 1: 4, 2: 5, 3: 6 };
+            opts.designerSize = sizes[mk];
+            if (!opts.designerSize) { console.error('--designer-size must be 1, 2, or 3'); process.exit(1); }
         }
     }
     if (!opts.name) opts.all = true;
@@ -115,6 +123,53 @@ function getAllObjects(save) {
         : Array.isArray(l.objects) ? l.objects
         : Object.values(l.objects || {})
     );
+}
+
+let lwCounter = 0;
+function lightweightToEntity(typePath, inst) {
+    const entity = {
+        typePath,
+        rootObject: 'Persistent_Level',
+        instanceName: `Persistent_Level:PersistentLevel.${typePath.split('.').pop()}_LW_${lwCounter++}`,
+        flags: 8,
+        properties: {},
+        specialProperties: { type: 'EmptySpecialProperties' },
+        trailingData: [],
+        saveCustomVersion: 0,
+        shouldMigrateObjectRefsToPersistent: false,
+        parentEntityName: '',
+        type: 'SaveEntity',
+        needTransform: true,
+        wasPlacedInLevel: false,
+        parentObject: { levelName: 'Persistent_Level', pathName: 'Persistent_Level:PersistentLevel.BuildableSubsystem' },
+        transform: inst.transform,
+        components: [],
+        _lightweight: true,
+    };
+    if (inst.usedRecipe?.pathName) {
+        entity.properties.mBuiltWithRecipe = {
+            type: 'ObjectProperty', name: 'mBuiltWithRecipe',
+            propertyTagType: { name: 'ObjectProperty', children: [] },
+            value: inst.usedRecipe,
+        };
+    }
+    if (inst.usedSwatchSlot?.pathName) {
+        entity.properties.mCustomizationData = {
+            type: 'StructProperty', name: 'mCustomizationData',
+            propertyTagType: { name: 'StructProperty', children: [{ name: 'FactoryCustomizationData', children: [{ name: '/Script/FactoryGame', children: [] }] }] },
+            value: {
+                type: 'FactoryCustomizationData',
+                properties: {
+                    SwatchDesc: {
+                        type: 'ObjectProperty', name: 'SwatchDesc',
+                        propertyTagType: { name: 'ObjectProperty', children: [] },
+                        value: inst.usedSwatchSlot,
+                    },
+                },
+            },
+        };
+    }
+    return entity;
 }
 
 function findBlueprintGroups(save) {
@@ -149,13 +204,30 @@ function findBlueprintGroups(save) {
         const entities = proxyEntities.get(proxy);
         entities.push(obj);
 
-        // Also collect child components referenced by this object
         const components = obj.components || [];
         for (const compRef of components) {
             const compPath = compRef.pathName || compRef;
             const comp = objectsByInstance.get(compPath);
             if (comp) entities.push(comp);
         }
+    }
+
+    // Collect lightweight buildables (foundations, walls, etc.) from subsystem
+    const lwSub = allObjects.find(o => o.typePath.includes('LightweightBuildableSubsystem'));
+    if (lwSub?.specialProperties?.buildables) {
+        let lwCount = 0;
+        for (const buildable of lwSub.specialProperties.buildables) {
+            for (const inst of buildable.instances) {
+                const pp = inst.blueprintProxy?.pathName;
+                if (!pp) continue;
+                const pathKey = pp.split('.').pop();
+                const proxy = proxyPathIndex.get(pathKey);
+                if (!proxy) continue;
+                proxyEntities.get(proxy).push(lightweightToEntity(buildable.typeReference.pathName, inst));
+                lwCount++;
+            }
+        }
+        console.log(`Found ${lwCount} lightweight buildables linked to blueprints`);
     }
 
     // Compute relative age (0=oldest, 100=newest) from proxy IDs (count down from INT32_MAX)
@@ -265,6 +337,32 @@ function selectInstance(instances, pick) {
         getProxyId(cur.proxy) < getProxyId(best.proxy) ? cur : best);
 }
 
+const DESIGNER_TIERS = { Mk1: 4, MK2: 5, Mk3: 6 };
+
+function detectMaxDesignerTier(save) {
+    const allObjects = getAllObjects(save);
+    let maxDim = 4;
+    for (const obj of allObjects) {
+        if (!obj.typePath.includes('BlueprintDesigner')) continue;
+        for (const [key, dim] of Object.entries(DESIGNER_TIERS)) {
+            if (obj.typePath.includes(key) && dim > maxDim) maxDim = dim;
+        }
+    }
+    return maxDim;
+}
+
+function computeDesignerDimension(objects, maxDim) {
+    let maxAbs = 0;
+    for (const obj of objects) {
+        const t = obj.transform?.translation;
+        if (!t) continue;
+        maxAbs = Math.max(maxAbs, Math.abs(t.x), Math.abs(t.y), Math.abs(t.z));
+    }
+    const needed = Math.max(Math.ceil(maxAbs / 400) * 2, 4);
+    const dim = Math.min(needed, maxDim);
+    return { x: dim, y: dim, z: dim };
+}
+
 function buildBlueprintFromEntities(name, proxy, entities, save) {
     // Collect recipe references from entities
     const recipes = new Set();
@@ -302,10 +400,7 @@ function buildBlueprintFromEntities(name, proxy, entities, save) {
         return clone;
     });
 
-    // Borrow version data from the save
     const objectVersionData = save.objectVersionData || {};
-
-    const bounds = getPropValue(proxy, 'mLocalBounds');
 
     return {
         name,
@@ -319,16 +414,16 @@ function buildBlueprintFromEntities(name, proxy, entities, save) {
             headerVersion: 2,
             saveVersion: save.header?.saveVersion || 60,
             buildVersion: save.header?.buildVersion || 495413,
-            designerDimension: { x: 8, y: 8, z: 8 },
+            designerDimension: computeDesignerDimension(cleanedObjects, save._maxDesignerDim),
             recipeReferences,
             itemCosts: [],
-            objectVersionData: objectVersionData,
+            objectVersionData,
         },
         config: {
             configVersion: 6,
-            description: `Restored from save file`,
+            description: 'Restored from save file',
             color: { r: 0.5, g: 0.5, b: 0.5, a: 1 },
-            iconID: 0,
+            iconID: 782,
             referencedIconLibrary: '/Game/FactoryGame/-Shared/Blueprint/IconLibrary',
             iconLibraryType: 'IconLibrary',
             lastEditedBy: { serviceProvider: 1, playerInfoTableIndex: 0 },
@@ -376,6 +471,8 @@ function extractBlueprints(save, groups, opts) {
         console.log('No blueprint groups found.');
         return;
     }
+
+    if (opts.designerSize) save._maxDesignerDim = opts.designerSize;
 
     const sessionDir = join(OUTPUT_DIR, save._sessionName);
     mkdirSync(sessionDir, { recursive: true });
