@@ -10,7 +10,7 @@ STAMP="$SCRIPT_DIR/.build-stamp"
 needs_build=false
 if ! podman image exists "$IMAGE_NAME" || [ ! -f "$STAMP" ]; then
     needs_build=true
-elif find "$SCRIPT_DIR/src" "$SCRIPT_DIR/package.json" "$SCRIPT_DIR/Dockerfile" -newer "$STAMP" | grep -q .; then
+elif find "$SCRIPT_DIR/src" "$SCRIPT_DIR/web" "$SCRIPT_DIR/package.json" "$SCRIPT_DIR/Dockerfile" -newer "$STAMP" | grep -q .; then
     needs_build=true
 fi
 
@@ -20,11 +20,22 @@ if [ "$needs_build" = true ]; then
     touch "$STAMP"
 fi
 
-mkdir -p "$SAVE_DIR" "$SAVE_DIR/output"
+if [ "${1:-}" = "serve" ]; then
+    PORT="${2:-8000}"
+    echo "Serving web UI at http://localhost:$PORT"
+    podman run --rm \
+        --read-only \
+        --security-opt=no-new-privileges \
+        -p "$PORT:$PORT" \
+        --entrypoint serve \
+        "$IMAGE_NAME" web/dist -l "$PORT"
+else
+    mkdir -p "$SAVE_DIR" "$SAVE_DIR/output"
 
-podman run --rm \
-    --read-only \
-    --security-opt=no-new-privileges \
-    -v "$SAVE_DIR:/data/saves:ro" \
-    -v "$SAVE_DIR/output:/data/output:rw" \
-    "$IMAGE_NAME" "$@"
+    podman run --rm \
+        --read-only \
+        --security-opt=no-new-privileges \
+        -v "$SAVE_DIR:/data/saves:ro" \
+        -v "$SAVE_DIR/output:/data/output:rw" \
+        "$IMAGE_NAME" "$@"
+fi

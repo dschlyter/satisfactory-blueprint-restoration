@@ -4,10 +4,15 @@
   "description": "",
   "main": "src/index.mjs",
   "scripts": {
-    "start": "node src/index.mjs"
+    "start": "node src/index.mjs",
+    "build:web": "node web/build.mjs",
+    "serve": "node web/build.mjs && npx serve web/dist"
   },
   "type": "module",
   "dependencies": {
     "@etothepii/satisfactory-file-parser": "^4.1.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1"
   }
 }
