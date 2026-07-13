@@ -363,6 +363,39 @@ function computeDesignerDimension(objects, maxDim) {
     return { x: dim, y: dim, z: dim };
 }
 
+function sanitizeObject(obj, entityNames) {
+    const props = obj.properties;
+    if (!props || typeof props !== 'object') return;
+
+    // Clear inventory contents
+    if (props.mInventoryStacks?.values) {
+        for (const stack of props.mInventoryStacks.values) {
+            if (stack.properties?.Item?.value) {
+                stack.properties.Item.value.itemReference = { levelName: '', pathName: '' };
+            }
+            if (stack.properties?.NumItems) stack.properties.NumItems.value = 0;
+        }
+    }
+
+    // Remove external factory connections (belt/pipe endpoints outside blueprint)
+    if (props.mConnectedComponent?.value?.pathName) {
+        if (!entityNames.has(props.mConnectedComponent.value.pathName)) {
+            delete props.mConnectedComponent;
+        }
+    }
+
+    // Filter power wires to only those referencing internal entities
+    if (props.mWires?.values) {
+        props.mWires.values = props.mWires.values.filter(w => entityNames.has(w.pathName));
+    }
+
+    // Strip runtime production state
+    delete props.mCurrentPotential;
+    delete props.mPendingPotential;
+    delete props.mProductivityMonitor;
+    delete props.mProductionBoostDuration;
+}
+
 function buildBlueprintFromEntities(name, proxy, entities, save) {
     // Collect recipe references from entities
     const recipes = new Set();
@@ -384,6 +417,8 @@ function buildBlueprintFromEntities(name, proxy, entities, save) {
     const originOffset = rotateByQuat({x: GRID_HALF_CELL, y: 0, z: 0}, proxyRot);
     const origin = {x: proxyPos.x + originOffset.x, y: proxyPos.y + originOffset.y, z: proxyPos.z + originOffset.z};
 
+    const entityNames = new Set(entities.map(e => e.instanceName));
+
     const cleanedObjects = entities.map(obj => {
         const clone = JSON.parse(JSON.stringify(obj));
         if (clone.properties instanceof Object && !Array.isArray(clone.properties)) {
@@ -397,6 +432,7 @@ function buildBlueprintFromEntities(name, proxy, entities, save) {
         if (clone.transform?.rotation) {
             clone.transform.rotation = quatMul(invRot, clone.transform.rotation);
         }
+        sanitizeObject(clone, entityNames);
         return clone;
     });
 
