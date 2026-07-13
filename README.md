@@ -2,6 +2,10 @@
 
 Satisfactory game saves are cloud synced, but blueprints are not, which means they will be lost when machines are switched. However the blueprints are still in the save file, so they can be extracted and restored. This tool helps you do this.
 
+**[Try it online](https://dschlyter.github.io/satisfactory-blueprint-restoration/)**
+
+**Current Status:** Tool is vibe coded. Limited in game testing has been done and import seems to work fine, but expect some potential issues. 
+
 # Development
 
 ## Web version
